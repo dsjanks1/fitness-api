@@ -282,23 +282,23 @@ export async function chatHandler(req: Request, res: Response): Promise<void> {
 
     // Save both messages (fire and forget)
     console.log('chat:save-messages:start')
-    void supabase
-      .from('chat_messages')
-      .insert([
-        { user_id: CURRENT_USER_ID, role: 'user', content: message },
-        { user_id: CURRENT_USER_ID, role: 'assistant', content: fullResponse },
-      ])
-      .then(({ error }) => {
-        if (error) {
-          console.error('chat:save-messages:error', error)
-          return
-        }
+    const chatMessages = [
+      { user_id: CURRENT_USER_ID, role: 'user' as const, content: message },
+      { user_id: CURRENT_USER_ID, role: 'assistant' as const, content: fullResponse },
+    ]
 
-        console.log('chat:save-messages:done')
-      })
-      .catch((error) => {
+    void (async () => {
+      const { error } = await (supabase.from('chat_messages') as any).insert(chatMessages)
+
+      if (error) {
         console.error('chat:save-messages:error', error)
-      })
+        return
+      }
+
+      console.log('chat:save-messages:done')
+    })().catch((error: unknown) => {
+      console.error('chat:save-messages:error', error)
+    })
   } catch (err) {
     console.error('chat:error', err)
     if (!res.writableEnded) {
