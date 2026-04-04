@@ -166,11 +166,20 @@ export async function chatHandler(req: Request, res: Response): Promise<void> {
   }
 
   res.setHeader('Content-Type', 'text/event-stream')
-  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Cache-Control', 'no-cache, no-transform')
   res.setHeader('Connection', 'keep-alive')
   res.flushHeaders()
+  res.write(`data: ${JSON.stringify({ ready: true })}\n\n`)
+
+  const keepAlive = setInterval(() => {
+    if (!res.writableEnded) {
+      res.write(':\n\n')
+    }
+  }, 15000)
 
   try {
+    console.log('chat:start')
+    console.log('chat:fetch-context:start')
     const [userRes, weightRes, goalRes] = await Promise.all([
       supabase.from('users').select('*').eq('id', CURRENT_USER_ID).single(),
       supabase
@@ -188,13 +197,26 @@ export async function chatHandler(req: Request, res: Response): Promise<void> {
         .limit(1)
         .maybeSingle(),
     ])
+    console.log('chat:fetch-context:done')
 
     const user = userRes.data as UserRow | null
     const weights = (weightRes.data ?? []) as WeightRow[]
     const goal = goalRes.data as GoalRow | null
 
+    if (userRes.error || weightRes.error || goalRes.error) {
+      console.error('chat:fetch-context:error', {
+        userError: userRes.error,
+        weightError: weightRes.error,
+        goalError: goalRes.error,
+      })
+      res.write(`data: ${JSON.stringify({ error: 'Failed to fetch chat context' })}\n\n`)
+      res.end()
+      return
+    }
+
     if (!user) {
-      res.write(`data: {"error":"User not found"}\n\n`)
+      console.error('chat:user-missing')
+      res.write(`data: ${JSON.stringify({ error: 'User not found' })}\n\n`)
       res.end()
       return
     }
@@ -209,12 +231,14 @@ export async function chatHandler(req: Request, res: Response): Promise<void> {
 
     let fullResponse = ''
 
+    console.log('chat:anthropic:start')
     const stream = anthropic.messages.stream({
       model: 'claude-sonnet-4-5',
       max_tokens: 1500,
       system: systemPrompt,
       messages,
     })
+    console.log('chat:anthropic:connected')
 
     for await (const chunk of stream) {
       if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
@@ -224,17 +248,36 @@ export async function chatHandler(req: Request, res: Response): Promise<void> {
       }
     }
 
+    console.log('chat:anthropic:done')
     res.write(`data: [DONE]\n\n`)
     res.end()
 
     // Save both messages (fire and forget)
-    void supabase.from('chat_messages').insert([
-      { user_id: CURRENT_USER_ID, role: 'user', content: message },
-      { user_id: CURRENT_USER_ID, role: 'assistant', content: fullResponse },
-    ])
+    console.log('chat:save-messages:start')
+    void supabase
+      .from('chat_messages')
+      .insert([
+        { user_id: CURRENT_USER_ID, role: 'user', content: message },
+        { user_id: CURRENT_USER_ID, role: 'assistant', content: fullResponse },
+      ])
+      .then(({ error }) => {
+        if (error) {
+          console.error('chat:save-messages:error', error)
+          return
+        }
+
+        console.log('chat:save-messages:done')
+      })
+      .catch((error) => {
+        console.error('chat:save-messages:error', error)
+      })
   } catch (err) {
-    console.error('Chat handler error:', err)
-    res.write(`data: {"error":"Something went wrong"}\n\n`)
-    res.end()
+    console.error('chat:error', err)
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify({ error: 'Something went wrong' })}\n\n`)
+      res.end()
+    }
+  } finally {
+    clearInterval(keepAlive)
   }
 }
