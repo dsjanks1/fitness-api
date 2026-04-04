@@ -2,12 +2,39 @@ import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@supabase/supabase-js'
 import type { Request, Response } from 'express'
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+type RuntimeClients = {
+  anthropic: Anthropic
+  supabase: ReturnType<typeof createClient>
+}
 
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY! // service role key - server only, never frontend
-)
+let runtimeClients: RuntimeClients | null = null
+
+function getMissingEnvVars(): string[] {
+  return ['ANTHROPIC_API_KEY', 'SUPABASE_URL', 'SUPABASE_SERVICE_KEY'].filter(
+    (key) => !process.env[key]?.trim()
+  )
+}
+
+function getRuntimeClients(): RuntimeClients {
+  if (runtimeClients) {
+    return runtimeClients
+  }
+
+  const missingEnvVars = getMissingEnvVars()
+  if (missingEnvVars.length) {
+    throw new Error(`Missing required env vars: ${missingEnvVars.join(', ')}`)
+  }
+
+  runtimeClients = {
+    anthropic: new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }),
+    supabase: createClient(
+      process.env.SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_KEY! // service role key - server only, never frontend
+    ),
+  }
+
+  return runtimeClients
+}
 
 const CURRENT_USER_ID = 1 // MVP: single user
 
@@ -178,6 +205,7 @@ export async function chatHandler(req: Request, res: Response): Promise<void> {
   }, 15000)
 
   try {
+    const { anthropic, supabase } = getRuntimeClients()
     console.log('chat:start')
     console.log('chat:fetch-context:start')
     const [userRes, weightRes, goalRes] = await Promise.all([
