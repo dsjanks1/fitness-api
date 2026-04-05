@@ -70,6 +70,69 @@ interface Stats {
   goalProgress: number | null
 }
 
+interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+interface YesterdayHealthContext {
+  date: string | null
+  steps: number | null
+  active_calories: number | null
+  sleep_hours: number | null
+  resting_hr: number | null
+  latest_weight_kg: number | null
+}
+
+interface RecentWorkoutContext {
+  activity_name: string | null
+  duration_seconds: number | null
+  calories: number | null
+  start_at: string | null
+}
+
+interface TodayPlanWorkoutItem {
+  name: string | null
+  sets: number | null
+  reps: string | null
+  completion_status: string | null
+}
+
+interface TodayPlanMealItem {
+  meal_slot: string | null
+  title: string | null
+  completion_status: string | null
+}
+
+interface TodayPlanContext {
+  summary_text: string | null
+  workoutItems: TodayPlanWorkoutItem[] | null
+  mealItems: TodayPlanMealItem[] | null
+}
+
+interface ChatRequestContext {
+  yesterdayHealth?: YesterdayHealthContext | null
+  recentWorkouts?: RecentWorkoutContext[] | null
+  todayPlan?: TodayPlanContext | null
+}
+
+interface ChatRequestBody {
+  message: string
+  history?: ChatMessage[]
+  context?: ChatRequestContext | null
+}
+
+const INTEGER_FORMATTER = new Intl.NumberFormat('en-US')
+const DECIMAL_FORMATTER = new Intl.NumberFormat('en-US', {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 1,
+})
+const SHORT_DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+  timeZone: 'UTC',
+})
+
 function computeStats(weights: WeightRow[], goal: GoalRow | null, heightCm: number | null): Stats {
   if (!weights.length) {
     return { currentWeight: null, totalLost: null, weeklyAvg: null, bmi: null, goalProgress: null }
@@ -104,16 +167,230 @@ function computeStats(weights: WeightRow[], goal: GoalRow | null, heightCm: numb
   return { currentWeight, totalLost, weeklyAvg, bmi, goalProgress }
 }
 
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function nonEmptyString(value: string | null | undefined): string | null {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : null
+}
+
+function formatShortDate(value: string | null | undefined): string | null {
+  const dateValue = nonEmptyString(value)
+  if (!dateValue) {
+    return null
+  }
+
+  const date = new Date(dateValue)
+  if (Number.isNaN(date.getTime())) {
+    return null
+  }
+
+  return SHORT_DATE_FORMATTER.format(date)
+}
+
+function formatDuration(durationSeconds: number | null | undefined): string | null {
+  if (!isFiniteNumber(durationSeconds) || durationSeconds <= 0) {
+    return null
+  }
+
+  const totalMinutes = Math.round(durationSeconds / 60)
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m`
+  }
+
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  return minutes ? `${hours}h ${minutes}m` : `${hours}h`
+}
+
+function formatMealSlot(slot: string | null | undefined): string | null {
+  const normalized = nonEmptyString(slot)?.toLowerCase()
+  if (!normalized) {
+    return null
+  }
+
+  switch (normalized) {
+    case 'breakfast':
+      return 'Breakfast'
+    case 'lunch':
+      return 'Lunch'
+    case 'dinner':
+      return 'Dinner'
+    case 'snack':
+      return 'Snack'
+    default:
+      return normalized
+        .split(/[_\s-]+/)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ')
+  }
+}
+
+function buildYesterdayHealthLine(yesterdayHealth: YesterdayHealthContext | null | undefined): string | null {
+  if (!yesterdayHealth) {
+    return null
+  }
+
+  const metrics: string[] = []
+
+  if (isFiniteNumber(yesterdayHealth.steps)) {
+    metrics.push(`${INTEGER_FORMATTER.format(yesterdayHealth.steps)} steps`)
+  }
+
+  if (isFiniteNumber(yesterdayHealth.active_calories)) {
+    metrics.push(`${INTEGER_FORMATTER.format(yesterdayHealth.active_calories)} active kcal`)
+  }
+
+  if (isFiniteNumber(yesterdayHealth.sleep_hours)) {
+    metrics.push(`${DECIMAL_FORMATTER.format(yesterdayHealth.sleep_hours)}h sleep`)
+  }
+
+  if (isFiniteNumber(yesterdayHealth.resting_hr)) {
+    metrics.push(`resting HR ${INTEGER_FORMATTER.format(yesterdayHealth.resting_hr)} bpm`)
+  }
+
+  if (isFiniteNumber(yesterdayHealth.latest_weight_kg)) {
+    metrics.push(`weight ${DECIMAL_FORMATTER.format(yesterdayHealth.latest_weight_kg)} kg`)
+  }
+
+  if (!metrics.length) {
+    return null
+  }
+
+  const dateLabel = nonEmptyString(yesterdayHealth.date) ?? 'Yesterday'
+  return `Yesterday (${dateLabel}): ${metrics.join(' | ')}`
+}
+
+function formatRecentWorkout(workout: RecentWorkoutContext): string | null {
+  const activityName = nonEmptyString(workout.activity_name)
+  const details: string[] = []
+
+  if (activityName) {
+    details.push(activityName)
+  }
+
+  const duration = formatDuration(workout.duration_seconds)
+  if (duration) {
+    details.push(duration)
+  }
+
+  if (isFiniteNumber(workout.calories)) {
+    details.push(`${INTEGER_FORMATTER.format(workout.calories)} kcal`)
+  }
+
+  if (!details.length) {
+    return null
+  }
+
+  const dateLabel = formatShortDate(workout.start_at)
+  return dateLabel ? `${details.join(' ')} (${dateLabel})` : details.join(' ')
+}
+
+function buildRecentWorkoutsLine(recentWorkouts: RecentWorkoutContext[] | null | undefined): string | null {
+  const workouts = (recentWorkouts ?? []).map(formatRecentWorkout).filter((value): value is string => Boolean(value))
+  return workouts.length ? `Recent workouts (last 7 days): ${workouts.join('; ')}` : null
+}
+
+function formatTodayPlanWorkout(item: TodayPlanWorkoutItem): string | null {
+  const name = nonEmptyString(item.name)
+  if (!name) {
+    return null
+  }
+
+  const reps = nonEmptyString(item.reps)
+  let details = name
+
+  if (isFiniteNumber(item.sets) && reps) {
+    details += ` ${item.sets}x${reps}`
+  } else if (isFiniteNumber(item.sets)) {
+    details += ` ${item.sets} sets`
+  } else if (reps) {
+    details += ` ${reps} reps`
+  }
+
+  const completionStatus = nonEmptyString(item.completion_status)
+  return completionStatus ? `${details} [${completionStatus}]` : details
+}
+
+function formatTodayPlanMeal(item: TodayPlanMealItem): string | null {
+  const slot = formatMealSlot(item.meal_slot)
+  const title = nonEmptyString(item.title)
+  if (!slot && !title) {
+    return null
+  }
+
+  const details = slot && title ? `${slot} - ${title}` : slot ?? title!
+  const completionStatus = nonEmptyString(item.completion_status)
+  return completionStatus ? `${details} [${completionStatus}]` : details
+}
+
+function buildTodayPlanLines(todayPlan: TodayPlanContext | null | undefined): string[] {
+  if (!todayPlan) {
+    return []
+  }
+
+  const summary = nonEmptyString(todayPlan.summary_text)
+  const workoutItems = (todayPlan.workoutItems ?? [])
+    .map(formatTodayPlanWorkout)
+    .filter((value): value is string => Boolean(value))
+  const mealItems = (todayPlan.mealItems ?? [])
+    .map(formatTodayPlanMeal)
+    .filter((value): value is string => Boolean(value))
+
+  if (!summary && !workoutItems.length && !mealItems.length) {
+    return []
+  }
+
+  const lines = [`Today's plan${summary ? `: ${summary}` : ':'}`]
+
+  if (workoutItems.length) {
+    lines.push(`  Workout: ${workoutItems.join('; ')}`)
+  }
+
+  if (mealItems.length) {
+    lines.push(`  Meals: ${mealItems.join('; ')}`)
+  }
+
+  return lines
+}
+
+function buildUserDataSection(context: ChatRequestContext | null | undefined): string {
+  if (!context) {
+    return ''
+  }
+
+  const lines = [
+    buildYesterdayHealthLine(context.yesterdayHealth),
+    buildRecentWorkoutsLine(context.recentWorkouts),
+    ...buildTodayPlanLines(context.todayPlan),
+  ].filter((value): value is string => Boolean(value))
+
+  if (!lines.length) {
+    return ''
+  }
+
+  return `
+
+--- USER DATA (do not repeat back verbatim, use naturally) ---
+${lines.join('\n')}
+---`
+}
+
 function buildSystemPrompt(
   user: UserRow,
   latestWeight: WeightRow | null,
   stats: Stats,
-  goal: GoalRow | null
+  goal: GoalRow | null,
+  context: ChatRequestContext | null | undefined
 ): string {
   const weightTrend =
     stats.weeklyAvg !== null
       ? `${stats.weeklyAvg < 0 ? 'Losing' : 'Gaining'} ${Math.abs(stats.weeklyAvg).toFixed(2)}kg/week on average`
       : 'Not enough data for trend'
+  const userDataSection = buildUserDataSection(context)
 
   return `You are a personal AI fitness coach. You know everything about this user. Be direct, concise, and personalized. No generic advice.
 
@@ -140,17 +417,58 @@ ${
 - Progress: ${stats.goalProgress?.toFixed(0) ?? 0}% complete
 - Remaining: ${latestWeight ? (latestWeight.weight_kg - goal.target_weight).toFixed(1) : '?'}kg to go`
     : '- No active goal set'
-}
+}${userDataSection}
 
 ## Your Instructions
 1. Be specific to this user's data. Reference their actual numbers.
 2. Respect their injuries ALWAYS. If they ask for a workout and have a wrist injury, avoid exercises that load the wrist. Flag substitutions explicitly.
 3. Respect dietary preferences. ${(user.dietary_prefs ?? []).includes('no_fish') ? 'Never suggest fish.' : ''}
-4. Keep responses concise for mobile. Use short paragraphs.
-5. When generating a workout, use the exact [WORKOUT_CARD] format below.
+4. Never expose raw JSON, field names, or mention a context payload. Use the data naturally when relevant.
+5. Keep responses concise for mobile. Use short paragraphs.
 6. When asked about progress, give honest assessments based on their data.
 7. If they're plateauing (< 0.2kg/week for 3+ weeks), address it directly.
 8. Tone: like a knowledgeable friend who trains, not a corporate wellness chatbot.
+
+## Daily Plan Format
+
+When the user asks you to create or update their plan for the day
+(workout, meals, or both), output a [DAILY_PLAN_V1] block AFTER your
+prose response. The block must be valid JSON matching this schema exactly:
+
+[DAILY_PLAN_V1]
+{
+  "summary": "One-sentence description of the day's focus",
+  "workout": [
+    {
+      "name": "Exercise name",
+      "sets": 3,
+      "reps": "10-12",
+      "restSeconds": 90,
+      "linkUrl": null
+    }
+  ],
+  "meals": [
+    {
+      "slot": "breakfast",
+      "title": "Meal name",
+      "guidance": "Short preparation or substitution tip",
+      "proteinG": 30,
+      "caloriesKcal": 450,
+      "linkUrl": null
+    }
+  ]
+}
+[/DAILY_PLAN_V1]
+
+Rules:
+- slot must be one of: breakfast, lunch, dinner, snack
+- sets/reps/restSeconds/linkUrl/proteinG/caloriesKcal are all nullable
+- Output the block even if only workout OR only meals were requested
+  (leave the other array empty: [])
+- Do NOT output the block for general advice - only for explicit plan
+  creation or modification requests
+- The prose before the block is shown in the chat bubble; keep it short
+  and mobile-friendly (3-5 sentences max)
 
 ## Workout Card Format
 
@@ -178,14 +496,11 @@ exercises:
   rest_seconds: 45
 [/WORKOUT_CARD]
 
-Only use this format when the user explicitly asks for a workout or training plan.`
+Only use this format when the user explicitly asks for a standalone workout or training plan that is not a create/update request for today's plan.`
 }
 
 export async function chatHandler(req: Request, res: Response): Promise<void> {
-  const { message, history } = req.body as {
-    message: string
-    history: Array<{ role: 'user' | 'assistant'; content: string }>
-  }
+  const { message, history, context } = (req.body ?? {}) as ChatRequestBody
 
   if (!message?.trim()) {
     res.status(400).json({ error: 'Message required' })
@@ -250,9 +565,9 @@ export async function chatHandler(req: Request, res: Response): Promise<void> {
     }
 
     const stats = computeStats(weights, goal, user.height_cm)
-    const systemPrompt = buildSystemPrompt(user, weights[0] ?? null, stats, goal)
+    const systemPrompt = buildSystemPrompt(user, weights[0] ?? null, stats, goal, context)
 
-    const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [
+    const messages: ChatMessage[] = [
       ...(history ?? []).slice(-20),
       { role: 'user', content: message },
     ]
@@ -276,6 +591,10 @@ export async function chatHandler(req: Request, res: Response): Promise<void> {
       }
     }
 
+    console.log('chat:response', {
+      prompt: message,
+      response: fullResponse,
+    })
     console.log('chat:anthropic:done')
     res.write(`data: [DONE]\n\n`)
     res.end()
